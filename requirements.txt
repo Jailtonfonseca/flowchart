@@ -1,7 +1,6 @@
 streamlit
 requests
 python-dotenv
-pytest
-# AutoGen framework package name may vary by release (autogen/pyautogen/autogen-agentchat).
-autogen
+pyautogen
 openai
+pytest
