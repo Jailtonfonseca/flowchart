@@ -1,31 +1,32 @@
 import json
+from unittest.mock import MagicMock
+from app import Verifier, VERIFIER_SYSTEM_PROMPT
 
-from app import make_verifier_prompt, parse_verifier_json
+def test_verifier_make_prompt():
+    v = Verifier(api_key="dummy", model="dummy")
+    prompt = v._make_prompt("task1", "sender1", "recipient1", "message1")
 
+    assert len(prompt) == 2
+    assert prompt[0]["role"] == "system"
+    assert prompt[0]["content"] == VERIFIER_SYSTEM_PROMPT
+    assert "task1" in prompt[1]["content"]
+    assert "sender1" in prompt[1]["content"]
 
-def test_make_verifier_prompt_contains_context_and_instructions():
-    messages = make_verifier_prompt(
-        task="Resumir texto",
-        sender="agent-1",
-        recipient="manager",
-        agent_message="Aqui está o resumo.",
-    )
-    assert messages[0]["role"] == "system"
-    assert "automated verifier" in messages[0]["content"]
-    assert messages[1]["role"] == "user"
-    assert "agent_message" in messages[1]["content"]
+def test_verifier_json_parsing_valid():
+    v = Verifier(api_key="dummy", model="dummy")
+    json_str = '{"verdict": "pass", "confidence": 0.9, "reason": "ok", "suggested_actions": []}'
+    result = v._parse_json(json_str)
+    assert result["verdict"] == "pass"
+    assert result["confidence"] == 0.9
 
+def test_verifier_json_parsing_markdown():
+    v = Verifier(api_key="dummy", model="dummy")
+    json_str = '```json\n{"verdict": "fail", "confidence": 0.1}\n```'
+    result = v._parse_json(json_str)
+    assert result["verdict"] == "fail"
 
-def test_parse_verifier_json_extracts_required_fields():
-    raw = json.dumps(
-        {
-            "verdict": "fail",
-            "confidence": 0.83,
-            "reason": "Sem fontes",
-            "suggested_actions": ["request_references", "reduce_temperature"],
-        }
-    )
-    parsed = parse_verifier_json(raw)
-    assert parsed["verdict"] == "fail"
-    assert parsed["confidence"] == 0.83
-    assert "request_references" in parsed["suggested_actions"]
+def test_verifier_json_parsing_broken():
+    v = Verifier(api_key="dummy", model="dummy")
+    json_str = 'This is not json but mentions fail.'
+    result = v._parse_json(json_str)
+    assert result["verdict"] == "fail" # Heuristic

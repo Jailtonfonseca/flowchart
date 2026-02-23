@@ -1,110 +1,77 @@
-# Flowchart Multi-Agent App (Streamlit + AutoGen + OpenRouter)
+# AutoGen Agent Builder + Verifier App
 
-Aplicação Streamlit que monta uma equipe dinâmica com AutoGen AgentBuilder, executa GroupChat e valida cada mensagem com um **Verifier** baseado em OpenRouter.
+A Streamlit application that dynamically builds a team of AI agents using AutoGen to solve a user task. It features a real-time **Verifier** agent that audits every message, provides a pass/fail verdict, and can automatically suggest or apply corrective actions (like adding/removing agents).
 
-## Recursos principais
+## Features
 
-- UI Streamlit com:
-  - Entrada de `OPENROUTER_API_KEY` (senha)
-  - Seleção de modelo
-  - Controle de `MAX_AGENTS`
-  - Toggle para auto-aplicar ações sugeridas pelo Verifier
-- Construção dinâmica de equipe via AgentBuilder (com fallback para simulação local)
-- Captura de mensagens por prioridade de fallback:
-  1. `register_reply` dos agentes
-  2. callbacks em nível de manager (quando disponíveis)
-  3. `logging.Handler` no logger do AutoGen
-  4. `redirect_stdout` e parsing heurístico
-- Verifier com saída JSON estrita (`verdict`, `confidence`, `reason`, `suggested_actions`, `patch_for_agent`)
-- Audit Trail com timeline e exportação de transcript em JSON/Markdown
-- Docker + docker-compose (porta 8501)
+- **Dynamic Team Building**: Uses AutoGen's `AgentBuilder` to create agents based on the task description.
+- **Real-time Verification**: A dedicated Verifier agent checks every message against the task context.
+- **Auto-Correction**: If enabled, the Verifier can modify the team structure or inject instructions to fix issues.
+- **Streamlit UI**: Visualize the chat and audit trail in real-time.
+- **Dockerized**: Easy deployment with Docker Compose.
 
-## Estrutura
+## Prerequisites
 
-- `app.py`
-- `requirements.txt`
-- `Dockerfile`
-- `docker-compose.yml`
-- `.env.example`
-- `tests/`
-- `scripts/smoke_run.sh`
-- `CHANGELOG.md`
+- Python 3.11+
+- [OpenRouter](https://openrouter.ai/) API Key (or OpenAI compatible key).
 
-## Configuração
+## Setup
 
-1. Copie as variáveis:
+1. **Clone the repository**:
+   ```bash
+   git clone <repo-url>
+   cd <repo-dir>
+   ```
 
+2. **Configure Environment**:
+   Copy `.env.example` to `.env` and fill in your API key.
+   ```bash
+   cp .env.example .env
+   # Edit .env
+   ```
+
+## Running with Docker (Recommended)
+
+1. Build and run:
+   ```bash
+   docker compose up --build -d
+   ```
+2. Access the app at `http://localhost:8501`.
+3. Stop:
+   ```bash
+   docker compose down
+   ```
+
+## Running Locally
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Run Streamlit:
+   ```bash
+   streamlit run app.py
+   ```
+
+## Testing
+
+Run unit tests:
 ```bash
-cp .env.example .env
+pytest
 ```
 
-2. Preencha:
-
-- `OPENROUTER_API_KEY`
-- `OPENROUTER_MODEL` (opcional)
-- `MAX_AGENTS` (opcional)
-
-> Nunca commitar `.env` real.
-
-## Rodar localmente
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Rodar com Docker Compose
-
-```bash
-docker compose up --build -d
-docker compose logs -f
-```
-
-Aplicação disponível em: `http://localhost:8501`
-
-## Testes
-
-```bash
-pytest tests/
-```
-
-Smoke test de container:
-
+Run smoke test (requires Docker):
 ```bash
 ./scripts/smoke_run.sh
 ```
 
-## OpenRouter request format
+## Architecture
 
-```python
-url = "https://openrouter.ai/api/v1/chat/completions"
-headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type":"application/json"}
-payload = {
-  "model": OPENROUTER_MODEL,
-  "messages": [
-    {"role":"system","content":"..."},
-    {"role":"user","content":"..."}
-  ],
-  "temperature": 0.0,
-  "max_tokens": 512
-}
-```
+- **`app.py`**: Main application logic. Handles Streamlit UI and spawns a background thread for the AutoGen orchestration.
+- **`Verifier`**: A class that calls the LLM to verify messages and returns structured JSON verdicts.
+- **`AgentBuilder`**: Uses `pyautogen` to generate agent configurations.
 
-## Notas sobre AutoGen (versões de pacote)
+## Troubleshooting
 
-A família AutoGen pode variar:
-
-- `autogen`
-- `pyautogen`
-- `autogen-agentchat`
-
-Se o import falhar, ajuste o pacote no `requirements.txt` e os imports no `app.py`.
-
-## Segurança, custo e performance
-
-- Use modelo de verificação menor (ex.: `gpt-4o-mini`) para reduzir custo.
-- Defina limites de tokens e rate limit por minuto.
-- Sanitizar logs/transcripts para remover dados sensíveis.
-- Para produção, mover worker para backend (FastAPI + WebSocket), deixando Streamlit só como frontend.
+- **Import Errors**: Ensure you have `pyautogen` installed. `pip install pyautogen`.
+- **Verifier Failures**: Check your OpenRouter API key and credit balance. The app will fallback to "pass" if the verifier is unavailable.
