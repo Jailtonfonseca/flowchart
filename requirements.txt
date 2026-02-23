@@ -1,6 +1,6 @@
 streamlit
 requests
 python-dotenv
-pyautogen
+pyautogen~=0.2.0
 openai
 pytest
