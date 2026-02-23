@@ -193,7 +193,30 @@ class Verifier:
         self.max_retries = max_retries
 
     def verify(self, task: str, sender: str, recipient: str, agent_message: str) -> Dict[str, Any]:
-        import requests
+        if not self.api_key or self.api_key == "DUMMY":
+            self.capture.push(
+                "audit",
+                "verifier",
+                "system",
+                "Verifier em modo simulado (sem chave válida).",
+            )
+            return {
+                "verdict": "pass",
+                "confidence": 0.2,
+                "reason": "Modo simulado sem OPENROUTER_API_KEY válida.",
+                "suggested_actions": [],
+            }
+
+        try:
+            import requests
+        except Exception as exc:  # noqa: BLE001
+            self.capture.push("audit", "verifier", "system", f"requests indisponível: {exc}")
+            return {
+                "verdict": "pass",
+                "confidence": 0.2,
+                "reason": "Dependência requests indisponível no ambiente.",
+                "suggested_actions": [],
+            }
 
         messages = make_verifier_prompt(task, sender, recipient, agent_message)
         url = f"{OPENROUTER_BASE_URL}/chat/completions"
@@ -310,71 +333,81 @@ def run_orchestrator(
     capture: CaptureBuffer,
     key_vault: KeyVault,
 ) -> None:
-    builder, groupchat, manager, agents = build_dynamic_agents(task, llm_config, max_agents, capture)
+    run_lock = getattr(key_vault, "_run_lock", None)
+    if run_lock is None:
+        run_lock = threading.Lock()
+        setattr(key_vault, "_run_lock", run_lock)
 
-    def on_agent_message(source: str, target: str, message: str) -> None:
-        capture.push("chat", source, target, message)
-        for key_name in extract_key_requests(message):
-            key_vault.request_key(key_name)
-            capture.push("audit", "agent", "settings", f"Agente solicitou chave: {key_name}")
-            capture.push("audit", "system", "settings", f"Aguardando usuário preencher chave '{key_name}'")
-            got_key = key_vault.wait_for_key(key_name, timeout=300)
-            if got_key:
-                capture.push("audit", "settings", "agent", f"Chave '{key_name}' recebida e liberada para execução")
-            else:
-                capture.push("audit", "settings", "agent", f"Timeout aguardando chave '{key_name}'")
-        verify_result = verifier.verify(task, source, target, message)
-        capture.push("audit", "verifier", source, json.dumps(verify_result, ensure_ascii=False), verify_result)
-        if verify_result.get("verdict") == "fail" and auto_apply and groupchat:
-            _apply_actions(verify_result, groupchat, llm_config, capture)
-
-    if not manager or not agents:
-        for i in range(3):
-            on_agent_message(f"sim-agent-{i+1}", "manager", f"Simulação passo {i+1}: analisando '{task[:80]}'")
-            time.sleep(0.3)
-        capture.push("audit", "system", "ui", "Simulação concluída.")
+    if not run_lock.acquire(blocking=False):
+        capture.push("audit", "system", "ui", "Outra execução já está ativa; nova execução cancelada.")
         return
 
-    registered = False
-    for ag in agents:
-        if hasattr(ag, "register_reply"):
-            try:
-
-                def _reply_hook(recipient, messages, sender, config):  # noqa: ANN001
-                    if messages:
-                        latest = messages[-1]
-                        content = latest.get("content", str(latest)) if isinstance(latest, dict) else str(latest)
-                        on_agent_message(getattr(sender, "name", "agent"), getattr(recipient, "name", "manager"), content)
-                    return False, None
-
-                ag.register_reply([type(manager), None], _reply_hook)
-                registered = True
-            except Exception as exc:  # noqa: BLE001
-                capture.push("audit", "system", "ui", f"register_reply failed for {getattr(ag, 'name', '?')}: {exc}")
-
-    handler = AutoGenLogHandler(capture)
-    logging.getLogger("autogen").addHandler(handler)
-    stdbuf = io.StringIO()
     try:
-        if hasattr(manager, "run_chat"):
-            with contextlib.redirect_stdout(stdbuf):
-                manager.run_chat(messages=[{"role": "user", "content": task}], sender=agents[0])
-        elif hasattr(agents[0], "initiate_chat"):
-            with contextlib.redirect_stdout(stdbuf):
-                agents[0].initiate_chat(manager, message=task)
-        else:
-            capture.push("audit", "system", "ui", "No known run method found; cannot execute AutoGen run.")
+        _builder, groupchat, manager, agents = build_dynamic_agents(task, llm_config, max_agents, capture)
 
-        if not registered:
-            for line in stdbuf.getvalue().splitlines():
-                if line.strip():
-                    capture.push("chat", "stdout-fallback", "ui", line.strip())
-    except Exception as exc:  # noqa: BLE001
-        capture.push("audit", "system", "ui", f"Execution failed: {exc}")
+        def on_agent_message(source: str, target: str, message: str) -> None:
+            capture.push("chat", source, target, message)
+            for key_name in extract_key_requests(message):
+                key_vault.request_key(key_name)
+                capture.push("audit", "agent", "settings", f"Agente solicitou chave: {key_name}")
+                capture.push("audit", "system", "settings", f"Aguardando usuário preencher chave '{key_name}'")
+                got_key = key_vault.wait_for_key(key_name, timeout=300)
+                if got_key:
+                    capture.push("audit", "settings", "agent", f"Chave '{key_name}' recebida e liberada para execução")
+                else:
+                    capture.push("audit", "settings", "agent", f"Timeout aguardando chave '{key_name}'")
+
+            verify_result = verifier.verify(task, source, target, message)
+            capture.push("audit", "verifier", source, json.dumps(verify_result, ensure_ascii=False), verify_result)
+            if verify_result.get("verdict") == "fail" and auto_apply and groupchat:
+                _apply_actions(verify_result, groupchat, llm_config, capture)
+
+        if not manager or not agents:
+            for i in range(3):
+                on_agent_message(f"sim-agent-{i+1}", "manager", f"Simulação passo {i+1}: analisando '{task[:80]}'")
+                time.sleep(0.3)
+            capture.push("audit", "system", "ui", "Simulação concluída.")
+            return
+
+        registered = False
+        for ag in agents:
+            if hasattr(ag, "register_reply"):
+                try:
+                    def _reply_hook(recipient, messages, sender, config):  # noqa: ANN001
+                        if messages:
+                            latest = messages[-1]
+                            content = latest.get("content", str(latest)) if isinstance(latest, dict) else str(latest)
+                            on_agent_message(getattr(sender, "name", "agent"), getattr(recipient, "name", "manager"), content)
+                        return False, None
+
+                    ag.register_reply([type(manager), None], _reply_hook)
+                    registered = True
+                except Exception as exc:  # noqa: BLE001
+                    capture.push("audit", "system", "ui", f"register_reply failed for {getattr(ag, 'name', '?')}: {exc}")
+
+        handler = AutoGenLogHandler(capture)
+        logging.getLogger("autogen").addHandler(handler)
+        stdbuf = io.StringIO()
+        try:
+            if hasattr(manager, "run_chat"):
+                with contextlib.redirect_stdout(stdbuf):
+                    manager.run_chat(messages=[{"role": "user", "content": task}], sender=agents[0])
+            elif hasattr(agents[0], "initiate_chat"):
+                with contextlib.redirect_stdout(stdbuf):
+                    agents[0].initiate_chat(manager, message=task)
+            else:
+                capture.push("audit", "system", "ui", "No known run method found; cannot execute AutoGen run.")
+
+            if not registered:
+                for line in stdbuf.getvalue().splitlines():
+                    if line.strip():
+                        capture.push("chat", "stdout-fallback", "ui", line.strip())
+        except Exception as exc:  # noqa: BLE001
+            capture.push("audit", "system", "ui", f"Execution failed: {exc}")
+        finally:
+            logging.getLogger("autogen").removeHandler(handler)
     finally:
-        logging.getLogger("autogen").removeHandler(handler)
-
-
+        run_lock.release()
 def export_transcript_json(chat_history: List[Dict[str, Any]], audit_trail: List[Dict[str, Any]]) -> str:
     return json.dumps({"chat_history": chat_history, "audit_trail": audit_trail}, ensure_ascii=False, indent=2)
 
