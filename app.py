@@ -164,6 +164,13 @@ def parse_verifier_json(raw_text: str) -> Dict[str, Any]:
     return data
 
 
+def safe_parse_verifier_json(raw_text: str) -> Optional[Dict[str, Any]]:
+    try:
+        return parse_verifier_json(raw_text)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _sanitize_key(value: str) -> str:
     return "" if not value else f"***{value[-4:]}"
 
@@ -192,6 +199,15 @@ class Verifier:
         self.timeout = timeout
         self.max_retries = max_retries
 
+    @staticmethod
+    def fallback_result(reason: str) -> Dict[str, Any]:
+        return {
+            "verdict": "pass",
+            "confidence": 0.2,
+            "reason": reason,
+            "suggested_actions": [],
+        }
+
     def verify(self, task: str, sender: str, recipient: str, agent_message: str) -> Dict[str, Any]:
         if not self.api_key or self.api_key == "DUMMY":
             self.capture.push(
@@ -200,23 +216,13 @@ class Verifier:
                 "system",
                 "Verifier em modo simulado (sem chave válida).",
             )
-            return {
-                "verdict": "pass",
-                "confidence": 0.2,
-                "reason": "Modo simulado sem OPENROUTER_API_KEY válida.",
-                "suggested_actions": [],
-            }
+            return self.fallback_result("Modo simulado sem OPENROUTER_API_KEY válida.")
 
         try:
             import requests
         except Exception as exc:  # noqa: BLE001
             self.capture.push("audit", "verifier", "system", f"requests indisponível: {exc}")
-            return {
-                "verdict": "pass",
-                "confidence": 0.2,
-                "reason": "Dependência requests indisponível no ambiente.",
-                "suggested_actions": [],
-            }
+            return self.fallback_result("Dependência requests indisponível no ambiente.")
 
         messages = make_verifier_prompt(task, sender, recipient, agent_message)
         url = f"{OPENROUTER_BASE_URL}/chat/completions"
@@ -228,17 +234,21 @@ class Verifier:
                 resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"]
-                return parse_verifier_json(content)
+                parsed = safe_parse_verifier_json(content)
+                if parsed is not None:
+                    return parsed
+                self.capture.push(
+                    "audit",
+                    "verifier",
+                    "system",
+                    "Resposta do verifier não veio em JSON válido; usando fallback local.",
+                )
+                return self.fallback_result("Resposta do verifier inválida (não-JSON).")
             except Exception as exc:  # noqa: BLE001
                 self.capture.push("audit", "verifier", "system", f"Verifier call failed attempt {attempt}/{self.max_retries}: {exc}")
                 time.sleep(min(2**attempt, 8))
 
-        return {
-            "verdict": "pass",
-            "confidence": 0.2,
-            "reason": "Verifier fallback due to unavailable endpoint.",
-            "suggested_actions": [],
-        }
+        return self.fallback_result("Verifier fallback due to unavailable endpoint.")
 
 
 def _resolve_autogen() -> Tuple[Any, Any, Any, Any, Optional[str]]:
@@ -364,7 +374,14 @@ def run_orchestrator(
 
         if not manager or not agents:
             for i in range(3):
-                on_agent_message(f"sim-agent-{i+1}", "manager", f"Simulação passo {i+1}: analisando '{task[:80]}'")
+                sim_msg = f"Simulação passo {i+1}: analisando '{task[:80]}'"
+                capture.push("chat", f"sim-agent-{i+1}", "manager", sim_msg)
+                capture.push(
+                    "audit",
+                    "verifier",
+                    f"sim-agent-{i+1}",
+                    json.dumps(Verifier.fallback_result("Verifier simulado no modo local."), ensure_ascii=False),
+                )
                 time.sleep(0.3)
             capture.push("audit", "system", "ui", "Simulação concluída.")
             return
