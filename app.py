@@ -7,9 +7,17 @@ import queue
 import re
 import threading
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # noqa: BLE001
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/anthropic/claude-sonnet-3.5")
@@ -56,30 +64,43 @@ class KeyVault:
         self._lock = threading.Lock()
         self._events: Dict[str, threading.Event] = {}
         self._values: Dict[str, str] = {}
-        self._requested: set[str] = set()
+        self._requested: Set[str] = set()
+
+    @staticmethod
+    def _normalize(key_name: str) -> str:
+        return (key_name or "").strip().lower()
 
     def request_key(self, key_name: str) -> None:
+        normalized = self._normalize(key_name)
+        if not normalized:
+            return
         with self._lock:
-            self._requested.add(key_name)
-            self._events.setdefault(key_name, threading.Event())
+            self._requested.add(normalized)
+            self._events.setdefault(normalized, threading.Event())
 
     def set_key(self, key_name: str, value: str) -> None:
+        normalized = self._normalize(key_name)
+        if not normalized:
+            return
         with self._lock:
             if value:
-                self._values[key_name] = value
-                self._requested.add(key_name)
-                event = self._events.setdefault(key_name, threading.Event())
-                event.set()
+                self._values[normalized] = value
+                self._requested.add(normalized)
+                self._events.setdefault(normalized, threading.Event()).set()
 
     def get_key(self, key_name: str) -> str:
+        normalized = self._normalize(key_name)
         with self._lock:
-            return self._values.get(key_name, "")
+            return self._values.get(normalized, "")
 
     def wait_for_key(self, key_name: str, timeout: int = 300) -> bool:
+        normalized = self._normalize(key_name)
+        if not normalized:
+            return False
         with self._lock:
-            if self._values.get(key_name):
+            if self._values.get(normalized):
                 return True
-            event = self._events.setdefault(key_name, threading.Event())
+            event = self._events.setdefault(normalized, threading.Event())
         return event.wait(timeout=timeout)
 
     def requested_keys(self) -> List[str]:
@@ -155,7 +176,7 @@ def extract_key_requests(message: str) -> List[str]:
     found: List[str] = []
     for pattern in patterns:
         found.extend(re.findall(pattern, message or "", flags=re.IGNORECASE))
-    normalized = []
+    normalized: List[str] = []
     for item in found:
         cleaned = item.strip().lower()
         if cleaned and cleaned not in normalized:
@@ -187,7 +208,7 @@ class Verifier:
                 return parse_verifier_json(content)
             except Exception as exc:  # noqa: BLE001
                 self.capture.push("audit", "verifier", "system", f"Verifier call failed attempt {attempt}/{self.max_retries}: {exc}")
-                time.sleep(min(2 ** attempt, 8))
+                time.sleep(min(2**attempt, 8))
 
         return {
             "verdict": "pass",
@@ -198,11 +219,20 @@ class Verifier:
 
 
 def _resolve_autogen() -> Tuple[Any, Any, Any, Any, Optional[str]]:
-    candidates = [("autogen", "AgentBuilder", "GroupChat", "GroupChatManager", "AssistantAgent"), ("pyautogen", "AgentBuilder", "GroupChat", "GroupChatManager", "AssistantAgent")]
+    candidates = [
+        ("autogen", "AgentBuilder", "GroupChat", "GroupChatManager", "AssistantAgent"),
+        ("pyautogen", "AgentBuilder", "GroupChat", "GroupChatManager", "AssistantAgent"),
+    ]
     for module_name, builder_name, group_name, mgr_name, agent_name in candidates:
         try:
             mod = __import__(module_name)
-            return getattr(mod, builder_name, None), getattr(mod, group_name, None), getattr(mod, mgr_name, None), getattr(mod, agent_name, None), module_name
+            return (
+                getattr(mod, builder_name, None),
+                getattr(mod, group_name, None),
+                getattr(mod, mgr_name, None),
+                getattr(mod, agent_name, None),
+                module_name,
+            )
         except Exception:  # noqa: BLE001
             continue
     return None, None, None, None, None
@@ -228,7 +258,13 @@ def build_dynamic_agents(task: str, llm_config: Dict[str, Any], max_agents: int,
 
     if not agents:
         for i in range(min(max_agents, 3)):
-            agents.append(AssistantAgent(name=f"Agent{i+1}", llm_config=llm_config, system_message=f"You are specialist #{i+1} working on: {task}"))
+            agents.append(
+                AssistantAgent(
+                    name=f"Agent{i+1}",
+                    llm_config=llm_config,
+                    system_message=f"You are specialist #{i+1} working on: {task}",
+                )
+            )
 
     groupchat = GroupChat(agents=agents, messages=[], max_round=12)
     manager = GroupChatManager(groupchat=groupchat, llm_config=llm_config)
@@ -236,7 +272,7 @@ def build_dynamic_agents(task: str, llm_config: Dict[str, Any], max_agents: int,
     return builder, groupchat, manager, agents
 
 
-def _apply_actions(result: Dict[str, Any], builder: Any, groupchat: Any, llm_config: Dict[str, Any], capture: CaptureBuffer) -> None:
+def _apply_actions(result: Dict[str, Any], groupchat: Any, llm_config: Dict[str, Any], capture: CaptureBuffer) -> None:
     actions = result.get("suggested_actions", []) or []
     for action in actions:
         try:
@@ -250,12 +286,14 @@ def _apply_actions(result: Dict[str, Any], builder: Any, groupchat: Any, llm_con
                     capture.push("audit", "verifier", "manager", f"Added agent {role_name}")
             elif action.startswith("remove_agent:"):
                 target = action.split(":", 1)[1].strip()
-                before = len(groupchat.agents)
-                groupchat.agents = [a for a in groupchat.agents if getattr(a, "name", "") != target]
-                capture.push("audit", "verifier", "manager", f"remove_agent {target}: {before}->{len(groupchat.agents)}")
+                if groupchat:
+                    before = len(groupchat.agents)
+                    groupchat.agents = [a for a in groupchat.agents if getattr(a, "name", "") != target]
+                    capture.push("audit", "verifier", "manager", f"remove_agent {target}: {before}->{len(groupchat.agents)}")
             elif action.startswith("modify_agent_system_prompt:"):
                 patch = action.split(":", 1)[1].strip()
-                groupchat.messages.append({"role": "system", "content": f"Verifier patch: {patch}"})
+                if groupchat:
+                    groupchat.messages.append({"role": "system", "content": f"Verifier patch: {patch}"})
                 capture.push("audit", "verifier", "manager", f"Patch injected: {patch}")
             else:
                 capture.push("audit", "verifier", "manager", f"Action noted: {action}")
@@ -276,8 +314,7 @@ def run_orchestrator(
 
     def on_agent_message(source: str, target: str, message: str) -> None:
         capture.push("chat", source, target, message)
-        requested = extract_key_requests(message)
-        for key_name in requested:
+        for key_name in extract_key_requests(message):
             key_vault.request_key(key_name)
             capture.push("audit", "agent", "settings", f"Agente solicitou chave: {key_name}")
             capture.push("audit", "system", "settings", f"Aguardando usuário preencher chave '{key_name}'")
@@ -289,7 +326,7 @@ def run_orchestrator(
         verify_result = verifier.verify(task, source, target, message)
         capture.push("audit", "verifier", source, json.dumps(verify_result, ensure_ascii=False), verify_result)
         if verify_result.get("verdict") == "fail" and auto_apply and groupchat:
-            _apply_actions(verify_result, builder, groupchat, llm_config, capture)
+            _apply_actions(verify_result, groupchat, llm_config, capture)
 
     if not manager or not agents:
         for i in range(3):
@@ -302,12 +339,14 @@ def run_orchestrator(
     for ag in agents:
         if hasattr(ag, "register_reply"):
             try:
+
                 def _reply_hook(recipient, messages, sender, config):  # noqa: ANN001
                     if messages:
                         latest = messages[-1]
                         content = latest.get("content", str(latest)) if isinstance(latest, dict) else str(latest)
                         on_agent_message(getattr(sender, "name", "agent"), getattr(recipient, "name", "manager"), content)
                     return False, None
+
                 ag.register_reply([type(manager), None], _reply_hook)
                 registered = True
             except Exception as exc:  # noqa: BLE001
@@ -352,6 +391,7 @@ def render_app() -> None:
     import streamlit as st
 
     st.set_page_config(page_title="Flowchart Multi-Agent Verifier", layout="wide")
+
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "audit_trail" not in st.session_state:
@@ -362,15 +402,22 @@ def render_app() -> None:
         st.session_state.key_vault = KeyVault()
     if "new_key_name" not in st.session_state:
         st.session_state.new_key_name = ""
+    if "worker" not in st.session_state:
+        st.session_state.worker = None
 
     st.sidebar.title("Configuração")
     page = st.sidebar.radio("Página", ["Chat", "Configurações"])
     key_vault: KeyVault = st.session_state.key_vault
+
     default_openrouter = key_vault.get_key("openrouter") or os.getenv("OPENROUTER_API_KEY", "")
     api_key = st.sidebar.text_input("OPENROUTER_API_KEY", type="password", value=default_openrouter)
     if api_key:
         key_vault.set_key("openrouter", api_key)
-    model = st.sidebar.selectbox("Modelo OpenRouter", [DEFAULT_MODEL, "openrouter/openai/gpt-4o-mini", "openrouter/meta-llama/llama-3.1-70b-instruct"])
+
+    model = st.sidebar.selectbox(
+        "Modelo OpenRouter",
+        [DEFAULT_MODEL, "openrouter/openai/gpt-4o-mini", "openrouter/meta-llama/llama-3.1-70b-instruct"],
+    )
     verifier_model = st.sidebar.selectbox("Modelo do Verifier (economia)", ["openrouter/openai/gpt-4o-mini", DEFAULT_MODEL])
     max_agents = st.sidebar.slider("MAX_AGENTS", min_value=2, max_value=10, value=DEFAULT_MAX_AGENTS)
     auto_apply = st.sidebar.checkbox("Habilitar ações automáticas do Verifier", value=False)
@@ -387,16 +434,25 @@ def render_app() -> None:
             requested = ["openrouter", *requested]
 
         with st.form("add-key-form"):
-            new_key_name = st.text_input("Adicionar novo serviço", value=st.session_state.new_key_name, placeholder="ex: serpapi")
+            new_key_name = st.text_input(
+                "Adicionar novo serviço",
+                value=st.session_state.new_key_name,
+                placeholder="ex: serpapi",
+            )
             add_clicked = st.form_submit_button("Adicionar campo")
             if add_clicked and new_key_name.strip():
-                key_vault.request_key(new_key_name.strip().lower())
+                key_vault.request_key(new_key_name)
                 st.session_state.new_key_name = ""
                 st.success(f"Campo para '{new_key_name.strip().lower()}' adicionado.")
 
         for key_name in requested:
             existing_val = key_vault.get_key(key_name)
-            typed = st.text_input(f"{key_name.upper()}_API_KEY", type="password", value=existing_val, key=f"kv-{key_name}")
+            typed = st.text_input(
+                f"{key_name.upper()}_API_KEY",
+                type="password",
+                value=existing_val,
+                key=f"kv-{key_name}",
+            )
             if typed:
                 key_vault.set_key(key_name, typed)
                 st.caption(f"{key_name}: {_sanitize_key(typed)}")
@@ -408,16 +464,22 @@ def render_app() -> None:
 
     task = st.text_area("Tarefa do usuário", value="Resuma os principais riscos de usar múltiplos agentes sem verificação.")
 
-    if st.button("Construir Equipe e Executar"):
+    worker = st.session_state.worker
+    running = bool(worker and worker.is_alive())
+    if running:
+        st.warning("Execução em andamento. Aguarde finalizar antes de iniciar outra.")
+
+    if st.button("Construir Equipe e Executar", disabled=running):
         st.session_state.chat_history = []
         st.session_state.audit_trail = []
         capture = st.session_state.capture
+
         if not api_key:
             capture.push("audit", "system", "ui", "OPENROUTER_API_KEY ausente. Rodando modo de simulação.")
 
         llm_config = build_llm_config(api_key=api_key or "DUMMY", model=model)
         verifier = Verifier(api_key=api_key or "DUMMY", model=verifier_model, capture=capture)
-        threading.Thread(
+        new_worker = threading.Thread(
             target=run_orchestrator,
             kwargs={
                 "task": task,
@@ -429,11 +491,16 @@ def render_app() -> None:
                 "key_vault": key_vault,
             },
             daemon=True,
-        ).start()
+        )
+        st.session_state.worker = new_worker
+        new_worker.start()
 
     capture = st.session_state.capture
-    while not capture.q.empty():
-        ev = capture.q.get_nowait()
+    while True:
+        try:
+            ev = capture.q.get_nowait()
+        except queue.Empty:
+            break
         target_list = st.session_state.chat_history if ev.kind == "chat" else st.session_state.audit_trail
         target_list.append(asdict(ev))
 
@@ -450,8 +517,18 @@ def render_app() -> None:
 
     st.divider()
     c1, c2 = st.columns(2)
-    c1.download_button("Exportar JSON", export_transcript_json(st.session_state.chat_history, st.session_state.audit_trail), file_name="transcript.json", mime="application/json")
-    c2.download_button("Exportar Markdown", export_transcript_markdown(st.session_state.chat_history, st.session_state.audit_trail), file_name="transcript.md", mime="text/markdown")
+    c1.download_button(
+        "Exportar JSON",
+        export_transcript_json(st.session_state.chat_history, st.session_state.audit_trail),
+        file_name="transcript.json",
+        mime="application/json",
+    )
+    c2.download_button(
+        "Exportar Markdown",
+        export_transcript_markdown(st.session_state.chat_history, st.session_state.audit_trail),
+        file_name="transcript.md",
+        mime="text/markdown",
+    )
 
 
 if __name__ == "__main__":
