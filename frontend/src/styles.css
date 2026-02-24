@@ -1,0 +1,14 @@
+:root { font-family: Arial, sans-serif; }
+body { margin: 0; background: #f6f8fa; }
+main { padding: 1rem; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.panel { background: white; padding: 1rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+textarea, input { width: 100%; margin-top: 0.3rem; margin-bottom: 0.8rem; }
+button { padding: 0.5rem 0.8rem; }
+.row { display: flex; gap: 0.5rem; align-items: center; }
+.log { max-height: 420px; overflow: auto; background: #0f172a; color: #e2e8f0; padding: 0.5rem; border-radius: 6px; }
+.banner { background: #fef3c7; padding: 0.6rem; border-radius: 6px; margin-bottom: 0.6rem; }
+.credential-card { border: 1px solid #e5e7eb; padding: 0.6rem; border-radius: 6px; margin-bottom: 0.5rem; }
+.credential-card.pending { border-color: #f59e0b; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; }
+.modal { background: white; width: 420px; padding: 1rem; border-radius: 8px; }

@@ -1,6 +1,1 @@
-streamlit
-requests
-python-dotenv
-pyautogen
-openai
-pytest
+-r backend/requirements.txt
