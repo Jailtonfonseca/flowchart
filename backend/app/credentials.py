@@ -1,5 +1,7 @@
 import os
 import threading
+import base64
+import hashlib
 from typing import Optional, List, Dict
 from cryptography.fernet import Fernet
 import logging
@@ -31,9 +33,19 @@ class CredentialStore:
 
         # Ensure key is bytes
         if isinstance(key, str):
-            key = key.encode()
+            key_bytes = key.encode()
+        else:
+            key_bytes = key
 
-        self.fernet = Fernet(key)
+        try:
+            self.fernet = Fernet(key_bytes)
+        except Exception as e:
+            logger.warning(f"SERVER_SECRET_KEY provided is invalid for Fernet directly ({e}). Deriving a valid key using SHA256.")
+            # Fallback: Use SHA256 to get 32 bytes, then urlsafe base64 encode
+            digest = hashlib.sha256(key_bytes).digest()
+            derived_key = base64.urlsafe_b64encode(digest)
+            self.fernet = Fernet(derived_key)
+
         self.store: Dict[str, bytes] = {} # Key: "user_id:provider", Value: encrypted_bytes
         self.waiters: Dict[str, threading.Event] = {} # Key: "user_id:provider", Value: Event
         self.waiters_lock = threading.Lock()
